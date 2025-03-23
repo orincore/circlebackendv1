@@ -16,7 +16,7 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: "*", // In production, specify your allowed origin (e.g., process.env.CORS_ORIGIN)
+    origin: "*", // In production, specify your allowed origin
     methods: ["GET", "POST"],
   },
 });
@@ -36,7 +36,10 @@ const calculateAge = (dateString) => {
 
 // In-memory data structures
 const users = {}; // Map: socket.id => userId (from Clerk)
-const waitingQueue = []; // Array of socket IDs waiting for a random match
+
+// Update waitingQueue to hold objects with socketId and timestamp
+const waitingQueue = []; // Array of { socketId, timestamp }
+const WAITING_THRESHOLD = 15000; // 15 seconds threshold for active waiting
 
 // Object to hold active random matches
 // Format: { roomId: { users: [socketId1, socketId2], acceptances: { socketId1: boolean, socketId2: boolean }, matchedUserData: Object } }
@@ -127,9 +130,11 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const currentInterests = currentProfile.interests.split(", ").map((i) => i.toLowerCase());
+    const currentInterests = currentProfile.interests
+      .split(", ")
+      .map((i) => i.toLowerCase());
 
-    // Query for potential matches (excluding current user)
+    // Query Supabase for potential matches (excluding current user)
     const { data: potentialMatches, error: matchError } = await supabase
       .from("user_profiles")
       .select("user_id, first_name, last_name, username, avatar, interests, gender, location, date_of_birth")
@@ -141,7 +146,7 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Filter matches for at least one mutual interest
+    // Filter potential matches for at least one mutual interest
     const mutualMatches = potentialMatches.filter((match) => {
       if (!match.interests) return false;
       const matchInterests = match.interests.split(", ").map((i) => i.toLowerCase());
@@ -153,12 +158,38 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Pick a random match from mutualMatches
-    const randomMatch = mutualMatches[Math.floor(Math.random() * mutualMatches.length)];
+    // Instead of matching immediately, check waitingQueue for an active waiting user
+    const now = Date.now();
+    const waitingEntryIndex = waitingQueue.findIndex(
+      (entry) => now - entry.timestamp < WAITING_THRESHOLD
+    );
 
-    // Ensure the matched user is online (check in our in-memory 'users')
-    const otherSocketId = Object.keys(users).find((sid) => users[sid] === randomMatch.user_id);
-    if (!otherSocketId) {
+    if (waitingEntryIndex === -1) {
+      // No active waiting user; add current socket to waitingQueue and inform them
+      waitingQueue.push({ socketId: socket.id, timestamp: now });
+      console.log(`User ${currentUserId} added to waiting queue.`);
+      socket.emit("randomMatchStatus", {
+        status: "waiting",
+        message: "Waiting for another user to join...",
+      });
+      return;
+    }
+
+    // Found an active waiting user; remove from waitingQueue
+    const waitingEntry = waitingQueue.splice(waitingEntryIndex, 1)[0];
+    const otherSocketId = waitingEntry.socketId;
+
+    // From mutualMatches, pick a match that corresponds to the waiting user if possible
+    // Otherwise, pick any random match
+    let selectedMatch = mutualMatches.find(
+      (match) => match.user_id === users[otherSocketId]
+    );
+    if (!selectedMatch) {
+      selectedMatch = mutualMatches[Math.floor(Math.random() * mutualMatches.length)];
+    }
+
+    // Ensure the matched user is online (exists in our in-memory users object)
+    if (!users[otherSocketId]) {
       socket.emit("randomMatchStatus", { status: "error", message: "No compatible online matches found." });
       return;
     }
@@ -169,38 +200,38 @@ io.on("connection", (socket) => {
       acceptances: { [socket.id]: false, [otherSocketId]: false },
     };
 
+    // Join both sockets to the room
     socket.join(roomId);
     const otherSocket = io.sockets.sockets.get(otherSocketId);
     if (otherSocket) {
       otherSocket.join(roomId);
     }
 
-    // Prepare the matched user data using real data from Supabase
+    // Prepare matched user data from the selected match
     const matchedUserData = {
-      id: randomMatch.user_id,
-      name: `${randomMatch.first_name || randomMatch.username} ${randomMatch.last_name || ""}`.trim(),
-      age: calculateAge(randomMatch.date_of_birth),
-      location: randomMatch.location,
-      gender: randomMatch.gender,
-      avatar: randomMatch.avatar || "https://via.placeholder.com/40",
+      id: selectedMatch.user_id,
+      name: `${selectedMatch.first_name || selectedMatch.username} ${selectedMatch.last_name || ""}`.trim(),
+      age: calculateAge(selectedMatch.date_of_birth),
+      location: selectedMatch.location,
+      gender: selectedMatch.gender,
+      avatar: selectedMatch.avatar || "https://via.placeholder.com/40",
     };
 
-    // Save the matched data in the match object for later use
+    // Save matched data in the match object
     randomMatches[roomId].matchedUserData = matchedUserData;
 
-    // Emit pending match status to both users
+    // Emit pending match status to both users with matched user details
     io.to(socket.id).emit("randomMatchStatus", {
       status: "pending",
       matchedUser: matchedUserData,
       roomId,
     });
-    // For the other socket, send minimal or masked details if desired
     io.to(otherSocketId).emit("randomMatchStatus", {
       status: "pending",
       matchedUser: { id: currentUserId, name: "Your Match" },
       roomId,
     });
-    console.log(`Matched ${currentUserId} with ${randomMatch.user_id} in room ${roomId}`);
+    console.log(`Matched ${currentUserId} with ${selectedMatch.user_id} in room ${roomId}`);
   });
 
   // Random Chat: Handle acceptance from a user
@@ -209,11 +240,11 @@ io.on("connection", (socket) => {
       randomMatches[roomId].acceptances[socket.id] = true;
       const { acceptances, users: matchUsers, matchedUserData } = randomMatches[roomId];
       if (matchUsers.every((id) => acceptances[id])) {
-        // Both accepted: Emit connected status with matched user details to both
+        // Both accepted: Emit connected status with full matched user data
         matchUsers.forEach((sockId) => {
           io.to(sockId).emit("randomMatchStatus", {
             status: "connected",
-            matchedUser: sockId === socket.id ? matchedUserData : matchedUserData, // Both get the same matched data; adjust masking as needed
+            matchedUser: matchedUserData,
             roomId,
           });
         });
@@ -232,13 +263,13 @@ io.on("connection", (socket) => {
     if (randomMatches[roomId]) {
       io.to(roomId).emit("randomMatchStatus", { status: "rejected", roomId });
       delete randomMatches[roomId];
-      waitingQueue.push(socket.id);
+      waitingQueue.push({ socketId: socket.id, timestamp: Date.now() });
     }
   });
 
   // Random Chat: User cancels random match request
   socket.on("cancelRandomMatch", () => {
-    const index = waitingQueue.indexOf(socket.id);
+    const index = waitingQueue.findIndex(entry => entry.socketId === socket.id);
     if (index !== -1) {
       waitingQueue.splice(index, 1);
       console.log(`User ${users[socket.id]} removed from waiting queue.`);
@@ -249,7 +280,7 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     console.log("Client disconnected:", socket.id);
     delete users[socket.id];
-    const index = waitingQueue.indexOf(socket.id);
+    const index = waitingQueue.findIndex(entry => entry.socketId === socket.id);
     if (index !== -1) waitingQueue.splice(index, 1);
   });
 });
