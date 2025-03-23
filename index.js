@@ -72,7 +72,7 @@ io.on("connection", (socket) => {
     } catch (err) {
       console.error("Error inserting private message:", err);
     }
-    // Emit message to the intended recipient
+    // Emit message to intended recipient
     Object.entries(users).forEach(([socketId, userId]) => {
       if (userId === recipientId) {
         io.to(socketId).emit("privateMessage", {
@@ -132,7 +132,9 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const currentInterests = currentProfile.interests.split(", ").map((i) => i.toLowerCase());
+    const currentInterests = currentProfile.interests
+      .split(", ")
+      .map((i) => i.toLowerCase());
     console.log(`User ${currentUserId} interests:`, currentInterests);
 
     // Check waitingQueue for an active waiting user within threshold
@@ -182,8 +184,8 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Create match room and store match data
-    const roomId = `random-${socket.id}-${otherSocketId}`;
+    // Use canonical room ID: sort the two socket IDs
+    const roomId = "random-" + [socket.id, otherSocketId].sort().join("-");
     randomMatches[roomId] = {
       users: [socket.id, otherSocketId],
       acceptances: { [socket.id]: false, [otherSocketId]: false },
@@ -214,7 +216,7 @@ io.on("connection", (socket) => {
       otherSocket.join(roomId);
     }
 
-    // Emit pending match status to both users with matched data
+    // Emit pending match status to both users with matched data (each sees the other's data)
     io.to(socket.id).emit("randomMatchStatus", {
       status: "pending",
       matchedUser: randomMatches[roomId].matchedUserData[socket.id],
@@ -290,9 +292,7 @@ io.on("connection", (socket) => {
 
 app.post("/api/clerk-webhook", async (req, res) => {
   const event = req.body;
-
   // NOTE: Validate webhook signature here for security (omitted for brevity)
-
   try {
     if (event.type === "user.created" || event.type === "user.updated") {
       const userData = event.data;
