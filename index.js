@@ -290,45 +290,64 @@ io.on("connection", (socket) => {
 // Clerk Webhook for Syncing with Supabase
 // ------------------------------
 
+// index.js (updated Clerk webhook handler)
 app.post("/api/clerk-webhook", async (req, res) => {
   const event = req.body;
-  // NOTE: Validate webhook signature here for security (omitted for brevity)
+  // IMPORTANT: Add signature verification in production
   try {
     if (event.type === "user.created" || event.type === "user.updated") {
       const userData = event.data;
+      
+      // Extract primary email address
+      const primaryEmailObj = userData.email_addresses?.find(
+        email => email.primary
+      );
+      const primaryEmail = primaryEmailObj?.email_address || null;
+
+      // Prepare profile data
       const profileData = {
         user_id: userData.id,
-        first_name: userData.first_name,
-        last_name: userData.last_name,
-        username: userData.username,
-        email: userData.email_addresses?.[0]?.email_address,
+        first_name: userData.first_name || null,
+        last_name: userData.last_name || null,
+        username: userData.username || null,
+        email: primaryEmail,
         gender: userData.public_metadata?.gender || null,
-        // Include additional fields as needed.
+        avatar_url: userData.profile_image_url || null,
+        updated_at: new Date().toISOString()
       };
 
+      // Upsert using the new clean data
       const { error } = await supabase
         .from("user_profiles")
-        .upsert(profileData, { onConflict: "user_id" });
+        .upsert(profileData, { 
+          onConflict: "user_id",
+          returning: "minimal" // Don't return the inserted record
+        });
+
       if (error) {
         console.error("Supabase upsert error:", error.message);
         return res.status(500).json({ error: error.message });
       }
-      console.log("Synced user data to Supabase:", userData.id);
+      console.log("Synced user data for:", userData.id);
+      
     } else if (event.type === "user.deleted") {
       const userId = event.data.id;
       const { error } = await supabase
         .from("user_profiles")
         .delete()
         .eq("user_id", userId);
+
       if (error) {
         console.error("Supabase deletion error:", error.message);
         return res.status(500).json({ error: error.message });
       }
-      console.log("Deleted user from Supabase:", userId);
+      console.log("Deleted user profile:", userId);
     }
-    res.status(200).json({ received: true });
+    
+    res.status(200).json({ success: true });
+    
   } catch (err) {
-    console.error("Webhook error:", err);
+    console.error("Webhook processing error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
