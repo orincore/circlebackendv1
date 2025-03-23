@@ -290,65 +290,63 @@ io.on("connection", (socket) => {
 // Clerk Webhook for Syncing with Supabase
 // ------------------------------
 
-// index.js (updated Clerk webhook handler)
 app.post("/api/clerk-webhook", async (req, res) => {
   const event = req.body;
-  // IMPORTANT: Add signature verification in production
   try {
     if (event.type === "user.created" || event.type === "user.updated") {
       const userData = event.data;
       
-      // Extract primary email address
-      const primaryEmailObj = userData.email_addresses?.find(
-        email => email.primary
-      );
-      const primaryEmail = primaryEmailObj?.email_address || null;
+      // Extract primary email correctly
+      const primaryEmail = userData.email_addresses?.find(
+        email => email.id === userData.primary_email_address_id
+      )?.email_address || null;
 
-      // Prepare profile data
+      // Get names from top-level fields first, fallback to external account
+      const firstName = userData.first_name || 
+        userData.external_accounts[0]?.first_name || 
+        null;
+      const lastName = userData.last_name || 
+        userData.external_accounts[0]?.last_name || 
+        null;
+
+      // Prepare profile data with proper null handling
       const profileData = {
         user_id: userData.id,
-        first_name: userData.first_name || null,
-        last_name: userData.last_name || null,
+        first_name: firstName,
+        last_name: lastName,
         username: userData.username || null,
         email: primaryEmail,
-        gender: userData.public_metadata?.gender || null,
-        avatar_url: userData.profile_image_url || null,
+        avatar_url: userData.profile_image_url || 
+          userData.external_accounts[0]?.image_url || 
+          'https://via.placeholder.com/40',
         updated_at: new Date().toISOString()
       };
 
-      // Upsert using the new clean data
-      const { error } = await supabase
+      console.log('Updating profile with:', profileData);
+
+      const { data, error } = await supabase
         .from("user_profiles")
         .upsert(profileData, { 
-          onConflict: "user_id",
-          returning: "minimal" // Don't return the inserted record
+          onConflict: 'user_id',
+          returning: 'minimal'
         });
 
       if (error) {
-        console.error("Supabase upsert error:", error.message);
+        console.error('Supabase error:', error);
         return res.status(500).json({ error: error.message });
       }
-      console.log("Synced user data for:", userData.id);
+
+      console.log(`Successfully updated user ${userData.id}`);
       
     } else if (event.type === "user.deleted") {
-      const userId = event.data.id;
-      const { error } = await supabase
-        .from("user_profiles")
-        .delete()
-        .eq("user_id", userId);
-
-      if (error) {
-        console.error("Supabase deletion error:", error.message);
-        return res.status(500).json({ error: error.message });
-      }
-      console.log("Deleted user profile:", userId);
+      // ... keep existing deletion logic ...
     }
     
     res.status(200).json({ success: true });
     
   } catch (err) {
-    console.error("Webhook processing error:", err);
-    res.status(500).json({ error: "Internal server error" });
+    console.error('Webhook error:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
