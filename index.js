@@ -16,7 +16,7 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: "*", // In production, replace "*" with your allowed origin (e.g. your frontend URL)
+    origin: "*", // In production, set this to your frontend's URL
     methods: ["GET", "POST"],
   },
 });
@@ -43,7 +43,7 @@ const waitingQueue = [];
 
 // randomMatches holds active random matches:
 // { roomId: { users: [socketId1, socketId2],
-//            acceptances: { socketId1: boolean, socketId2: boolean },
+//            acceptances: { [socketId]: boolean },
 //            matchedUserData: { [socketId]: userProfileData } } }
 const randomMatches = {};
 
@@ -72,7 +72,7 @@ io.on("connection", (socket) => {
     } catch (err) {
       console.error("Error inserting private message:", err);
     }
-    // Emit message to recipient
+    // Emit message to the intended recipient
     Object.entries(users).forEach(([socketId, userId]) => {
       if (userId === recipientId) {
         io.to(socketId).emit("privateMessage", {
@@ -132,19 +132,13 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const currentInterests = currentProfile.interests
-      .split(", ")
-      .map((i) => i.toLowerCase());
+    const currentInterests = currentProfile.interests.split(", ").map((i) => i.toLowerCase());
     console.log(`User ${currentUserId} interests:`, currentInterests);
 
-    // Check waitingQueue for an active waiting user (within threshold)
+    // Check waitingQueue for an active waiting user within threshold
     const now = Date.now();
-    const waitingEntryIndex = waitingQueue.findIndex(
-      (entry) => now - entry.timestamp < WAITING_THRESHOLD
-    );
-
+    const waitingEntryIndex = waitingQueue.findIndex(entry => now - entry.timestamp < WAITING_THRESHOLD);
     if (waitingEntryIndex === -1) {
-      // No active waiting user; add current user to waitingQueue and emit waiting status
       waitingQueue.push({ socketId: socket.id, timestamp: now });
       console.log(`User ${currentUserId} added to waiting queue.`);
       socket.emit("randomMatchStatus", {
@@ -181,7 +175,7 @@ io.on("connection", (socket) => {
     // Check mutual interests between current user and waiting user
     const interests1 = currentUserProfile.interests.split(", ").map((i) => i.toLowerCase());
     const interests2 = waitingUserProfile.interests.split(", ").map((i) => i.toLowerCase());
-    const hasMutual = interests1.some((i) => interests2.includes(i));
+    const hasMutual = interests1.some(i => interests2.includes(i));
     if (!hasMutual) {
       console.log(`No mutual interests between ${currentUserId} and ${waitingUserId}`);
       socket.emit("randomMatchStatus", { status: "error", message: "No mutual interests found." });
@@ -193,7 +187,6 @@ io.on("connection", (socket) => {
     randomMatches[roomId] = {
       users: [socket.id, otherSocketId],
       acceptances: { [socket.id]: false, [otherSocketId]: false },
-      // Store full profile details for each socket so each end can see the other’s info
       matchedUserData: {
         [socket.id]: {
           id: waitingUserProfile.user_id,
@@ -210,18 +203,18 @@ io.on("connection", (socket) => {
           location: currentUserProfile.location,
           gender: currentUserProfile.gender,
           avatar: currentUserProfile.avatar || "https://via.placeholder.com/40",
-        },
-      },
+        }
+      }
     };
 
-    // Join both sockets to the match room
+    // Join both sockets to the room
     socket.join(roomId);
     const otherSocket = io.sockets.sockets.get(otherSocketId);
     if (otherSocket) {
       otherSocket.join(roomId);
     }
 
-    // Emit pending match status to both users with the matched data for each
+    // Emit pending match status to both users with matched data
     io.to(socket.id).emit("randomMatchStatus", {
       status: "pending",
       matchedUser: randomMatches[roomId].matchedUserData[socket.id],
@@ -239,20 +232,24 @@ io.on("connection", (socket) => {
   socket.on("randomMatchAccept", ({ roomId }) => {
     if (randomMatches[roomId]) {
       randomMatches[roomId].acceptances[socket.id] = true;
+      console.log(`Socket ${socket.id} accepted match in room ${roomId}`);
       const { acceptances, users: matchUsers, matchedUserData } = randomMatches[roomId];
-      if (matchUsers.every((id) => acceptances[id])) {
-        // Both accepted: Emit connected status with full matched user details to both
-        matchUsers.forEach((sockId) => {
+      // Check if both users have accepted
+      if (matchUsers.every(id => acceptances[id])) {
+        // Both accepted: Emit connected status with full matched data to both
+        matchUsers.forEach(sockId => {
           io.to(sockId).emit("randomMatchStatus", {
             status: "connected",
             matchedUser: matchedUserData[sockId],
             roomId,
           });
         });
+        console.log(`Both users accepted match in room ${roomId}`);
       } else {
+        // Only one has accepted; emit waiting status to the socket that just accepted
         io.to(socket.id).emit("randomMatchStatus", {
-          status: "pending",
-          matchedUser: null,
+          status: "waiting",
+          matchedUser: matchedUserData[socket.id],
           roomId,
         });
       }
@@ -263,6 +260,7 @@ io.on("connection", (socket) => {
   socket.on("randomMatchReject", ({ roomId }) => {
     if (randomMatches[roomId]) {
       io.to(roomId).emit("randomMatchStatus", { status: "rejected", roomId });
+      console.log(`Match in room ${roomId} was rejected.`);
       delete randomMatches[roomId];
       waitingQueue.push({ socketId: socket.id, timestamp: Date.now() });
     }
@@ -270,7 +268,7 @@ io.on("connection", (socket) => {
 
   // Random Chat: User cancels random match request
   socket.on("cancelRandomMatch", () => {
-    const index = waitingQueue.findIndex((entry) => entry.socketId === socket.id);
+    const index = waitingQueue.findIndex(entry => entry.socketId === socket.id);
     if (index !== -1) {
       waitingQueue.splice(index, 1);
       console.log(`User ${users[socket.id]} removed from waiting queue.`);
@@ -281,7 +279,7 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     console.log("Client disconnected:", socket.id);
     delete users[socket.id];
-    const index = waitingQueue.findIndex((entry) => entry.socketId === socket.id);
+    const index = waitingQueue.findIndex(entry => entry.socketId === socket.id);
     if (index !== -1) waitingQueue.splice(index, 1);
   });
 });
@@ -305,7 +303,7 @@ app.post("/api/clerk-webhook", async (req, res) => {
         username: userData.username,
         email: userData.email_addresses?.[0]?.email_address,
         gender: userData.public_metadata?.gender || null,
-        // Add additional fields as needed.
+        // Include additional fields as needed.
       };
 
       const { error } = await supabase
